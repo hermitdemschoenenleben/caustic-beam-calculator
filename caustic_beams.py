@@ -30,7 +30,7 @@ LIMITS = [
     #(0,)*2,  # d axis
 ]#
 # number of data points for each axis
-RESOLUTION = [200,200]
+RESOLUTION = [300,300]
 # number of weights for legendre gauss integration
 NUM_WEIGHTS = 500
 # neglected integral is proportional to exp(-D)
@@ -192,7 +192,10 @@ mat2_neg = copy(mat)
 angle = np.pi / (2 * ORDER)
 angle_neg = ((-1) ** ORDER) * np.pi / (2 * ORDER)
 
-for s, w in zip(s_values, weights):
+for i, s, w in zip(range(NUM_WEIGHTS), s_values, weights):
+    if i > 0 and i % (NUM_WEIGHTS/10) == 0:
+        print str(int(float(i) / NUM_WEIGHTS * 100)) + '%'
+
     # integration from 0 to R1
     mat += w * caustic_beam(s * roots_fine, *grid_fine)
     # integration from 0 to -R2
