@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Feb 22 13:44:16 2016
+Calculate caustic beams.
 
-@author: ben
-S"""
+Author: Benjamin Wiegand, highwaychile@zoho.com
+"""
 import sympy as sp
 import numpy as np
 import pickle
 from time import time
-from copy import copy
 from string import lowercase
 from matplotlib import pyplot as plt
 from numpy.polynomial.legendre import leggauss
@@ -25,14 +24,14 @@ ORDER = 6
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
-    (-50,50),   # a axis
+    (-150,150),   # a axis
     -10,        # c axis
-    (-50,50),   # b axis
+    (-150,150),   # b axis
     -10,        # d axis
 ]
 
 # number of data points for each axis
-RESOLUTION = [300,300]
+RESOLUTION = [1920,1080]
 
 # number of weights for integration. Set this to 0 in order to use the
 # continuous mode.
@@ -117,12 +116,12 @@ expr_ddd = sp.diff(expr_dd, S)
 if ORDER == 4:
     # find saddle points (dep. of S)
     saddles_s = sp.solve(expr_d, S)
-    
+
     # calculate the value of the function and its derivatives at each saddle point
     def _plug_in(expr, S, saddle_s, var):
         expr = expr.subs(S, saddle_s)
         return sp.lambdify(var, expr, [{'ImmutableMatrix': np.array}, 'numpy'])
-    
+
     val = [_plug_in(catastrophe, S, saddle_s, var) for saddle_s in saddles_s]
     d = [_plug_in(expr_d, S, saddle_s, var) for saddle_s in saddles_s]
     dd = [_plug_in(expr_dd, S, saddle_s, var) for saddle_s in saddles_s]
@@ -187,7 +186,7 @@ def get_coeff(pos, neg=False):
     pref = neg and -1 or 1
 
     coeff = np.zeros(ORDER + 1)
-    
+
     # zeroth order
     coeff[-1] = -D
 
@@ -197,7 +196,7 @@ def get_coeff(pos, neg=False):
         coeff[idx] = (pref ** order) * pos[i] * \
             np.sin(fac * order * np.pi / (2*ORDER))
 
-    # highest order    
+    # highest order
     coeff[0] = 1
     return coeff
 
@@ -233,7 +232,7 @@ def integration_method():
 
     roots_coarse = np.squeeze(grid_coarse[0])
     roots_coarse_neg = np.squeeze(grid_coarse[1])
-    
+
     # the hack above changed grid_coarse
     del grid_coarse
 
@@ -252,8 +251,8 @@ def integration_method():
     # results of integration along the real axis
     mat_line = np.zeros(RESOLUTION).astype(np.complex)
     # results of integration along the arcs
-    mat_arc_pos = copy(mat_line)
-    mat_arc_neg = copy(mat_line)
+    mat_arc_pos = np.copy(mat_line)
+    mat_arc_neg = np.copy(mat_line)
 
     # at which angle is the endpoint of the integration along the arc
     angle_pos = np.pi / (2 * ORDER)
@@ -274,7 +273,7 @@ def integration_method():
                 fact_line = 1.0 / n_weights
                 fact_arc = fact_line / CALCULATE_ARC_EVERY_N_STEPS
                 s_values = np.arange(0, 1, 1.0/n_weights)
-    
+
             # evaluate the function only at values of s that were not yet
             # evaluated
             s_values_new = np.setdiff1d(s_values, s_values_used)
@@ -310,7 +309,7 @@ def integration_method():
 
             if SHOW_INTEGRATION_PATH:
                 return
-    
+
             # calculate E field and remove empty extra dimensions
             E = np.squeeze(
                 mat_line * fact_line * (roots_fine_pos + roots_fine_neg) +
@@ -351,42 +350,42 @@ def steepest_descent():
 
     print 'METHOD OF STEEPEST DESCENT'
     t = time()
-    limits_s = copy(LIMITS)
-    resolution_s = copy(RESOLUTION)
+    limits_s = np.copy(LIMITS)
+    resolution_s = np.copy(RESOLUTION)
 
     if SYMMETRY is not None:
         # calculate only half of the image for symmetry reasons
         limits_s[SYMMETRY] = (limits_s[SYMMETRY][0], 0)
         assert RESOLUTION[SYMMETRY] % 2 == 0, 'Resolution in symmetry direction has to be even'
         resolution_s[SYMMETRY] = resolution_s[SYMMETRY] / 2
-    
-    
+
+
     def _saddle_contribution(val, dd, saddle_i, *positions):
         """
         Calculates the contribution to the E-field of each saddle.
         """
         val = val[saddle_i](*positions)
         deriv = dd[saddle_i](*positions)
-    
+
         ang = np.angle(deriv)
         theta_ = (np.pi - ang) / 2
 
         if saddle_i == 1:
             theta_[theta_ > np.pi/2] -= np.pi
-    
+
         return np.exp(1j * (val + theta_)) * np.sqrt(2*np.pi/abs(deriv))
-    
+
     # create the grid
     slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(limits_s, resolution_s)]
     positions = np.mgrid[slices].astype(complex)
-    
+
     # calculate E field
     E_s = sum(_saddle_contribution(val, dd, i, *positions) for i,s in enumerate(saddles_s))
     E_s[np.isnan(E_s)] = 0
-    
+
     # make use of symmetry
     stack = (PLOT_AXES.index(SYMMETRY) == 0) and np.vstack or np.hstack
-    
+
     print '%f seconds' % (time() - t)
     return stack((E_s, np.flipud(E_s))).T
 
@@ -439,14 +438,15 @@ def plot(E_i, E_s, preview=False):
         plt.ylim(min(axes[1]), max(axes[1]))
         plt.xlabel(lowercase[PLOT_AXES[0]])
         plt.ylabel(lowercase[PLOT_AXES[1]])
-    
+
     _plot(I, 0, None, 1)
     _plot(ang, -np.pi, np.pi, 2)
+
 
 def show_complex_plain():
     res = 1000
     pos = [l[0] for l in LIMITS]
-    
+
     root_pos, root_neg = get_highest_real_root(pos)
 
     xl = (-root_neg - 1, root_pos + 1)
@@ -461,7 +461,7 @@ def show_complex_plain():
 
     xran = np.linspace(xl[0],xl[1],1000)
     yran = np.linspace(yl[0],yl[1],1000)
-    
+
     plt.clf()
     plt.pcolormesh(xran,yran,res,vmin=0,vmax=1)
     plt.xlim(*xl)
@@ -477,11 +477,11 @@ if __name__ == '__main__':
         plt.set_cmap('jet')
 
     E_i = integration_method()
-    
+
     if not SHOW_INTEGRATION_PATH and ORDER == 4:
         E_s = steepest_descent()
     else:
         E_s = 0
-    
+
     if not SHOW_INTEGRATION_PATH:
         plot(E_i, E_s)
