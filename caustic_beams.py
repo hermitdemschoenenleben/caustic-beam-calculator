@@ -12,6 +12,7 @@ from string import lowercase
 from matplotlib import pyplot as plt
 from numpy.polynomial.legendre import leggauss
 from scipy import interpolate
+from itertools import combinations
 # spyder always imports the numpy version of sum, but we need the builtin
 # version
 from __builtin__ import sum
@@ -19,13 +20,14 @@ from __builtin__ import sum
 # ================== CONFIGURATION ==================
 
 # the order of the catastrophe
-ORDER = 4
+ORDER = 5
 
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
     (-50,50),   # a axis
     #-100,
+    0,
     (-50,50),   # b axis
     #100,        # c axis
     #   -10,        # d axis
@@ -312,7 +314,7 @@ def integration_method():
                 mat_arc_neg * fact_arc * roots_fine_neg * abs(angle_neg) / (2*np.pi)
             ).T
 
-            plot(E, 0, preview=True)
+            plot(E, E_s)
             plt.pause(0.1)
 
             if not CONTINUOUS and not GAUSS and not SHOW_INTEGRATION_PATH:
@@ -351,6 +353,8 @@ def steepest_descent():
     range_coarse = [np.linspace(l[0], l[1], N_ROOTS_STEEP) for l in PLOT_LIMITS]
     roots_coarse = [np.zeros(grid_coarse[0].shape).astype(complex) for i in xrange(ORDER-1)]
 
+    root_distance_coarse = np.zeros(grid_coarse[0].shape)
+
     # calculate a coarse grid of roots
     for idx in np.ndindex(grid_coarse[0].shape):
         #for c in zip(*[np.nditer(coord, op_flags=['readwrite']) for coord in grid_coarse]):
@@ -358,17 +362,25 @@ def steepest_descent():
         tmp = [d(*c) for d in d_roots]
         roots = np.roots(tmp)
 
+        cs = []
+        for co in combinations(roots,2):
+            cs.append(abs(co[0]-co[1]))
+        root_distance_coarse[idx] = min(cs)
+
         for i, root in enumerate(roots):
             roots_coarse[i][idx] = root
 
     roots_coarse = [np.squeeze(roots_coarse[i]) for i in xrange(ORDER-1)]
+    root_distance_coarse = np.squeeze(root_distance_coarse)
 
     # create fine grid for the roots by means of interpolation
     intp = lambda mat: interpolate.RectBivariateSpline(range_coarse[0], range_coarse[1], mat)
     f_real = [intp(np.real(root_coarse)) for root_coarse in roots_coarse]
     f_imag = [intp(np.imag(root_coarse)) for root_coarse in roots_coarse]
+    f_dist = intp(root_distance_coarse)
     intp2 = lambda fct: fct(range_fine[0], range_fine[1])
     roots_fine = [intp2(f_real[i])+1j*intp2(f_imag[i]) for i in xrange(ORDER-1)]
+    root_distance_fine = intp2(f_dist)
 
     # we have to expand the dimension of the grid again
     for i, l in enumerate(LIMITS):
@@ -395,14 +407,14 @@ def steepest_descent():
     E_s = sum(_saddle_contribution(i, grid_fine) for i in xrange(ORDER-1))
 
     print '%f seconds' % (time() - t)
-    return np.squeeze(E_s.T)
+    return np.squeeze(E_s.T), root_distance_fine.T
 
 
 
 # ============================= PLOTS =============================
 
 
-def plot(E_i, E_s, preview=False):
+def plot(E_i, E_s):
     # how far away from the caustic should the result of integration method
     # and method of steepest descent be joined?
     CAUSTIC_DISTANCE = 15
@@ -413,18 +425,23 @@ def plot(E_i, E_s, preview=False):
         if i in PLOT_AXES:
             axes.append(np.linspace(lim[0], lim[1], res))
 
-    if USE_MASK and ORDER == 4 and not preview:
+    if USE_MASK:
         mask = np.zeros(E_s.shape)
-
+        """
         # position of the caustic y=f(x)
         f = lambda x: -(27.0/8*(abs(x)+CAUSTIC_DISTANCE)**2)**(1.0/3)
 
         for i, x_ in enumerate(axes[0]):
             for j, y_ in enumerate(axes[1]):
+                #if abs(f(x_) - y_) > 10:
                 if f(x_) > y_:
                     mask[i,j] = 1
 
-        mask = mask.T
+        mask = mask.T"""
+        mask[root_distance > 1] = 1
+        #clf()
+        #pcolormesh(mask);
+        #asdas()
 
         E_s_mask = np.ma.masked_array(E_s, mask==0)
         E_i_mask = np.ma.masked_array(E_i, mask)
@@ -485,12 +502,13 @@ if __name__ == '__main__':
     else:
         plt.set_cmap('jet')
 
-    E_i = integration_method()
-
     if not SHOW_INTEGRATION_PATH:
-        E_s = steepest_descent()
+        E_s, root_distance = steepest_descent()
+        pass
     else:
         E_s = 0
+
+    E_i = integration_method()
 
     if not SHOW_INTEGRATION_PATH:
         plot(E_i, E_s)
