@@ -19,27 +19,33 @@ from __builtin__ import sum
 # ================== CONFIGURATION ==================
 
 # the order of the catastrophe
-ORDER = 6
+ORDER = 4
 
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
-    (-150,150),   # a axis
-    -10,        # c axis
-    (-150,150),   # b axis
-    -10,        # d axis
+    (-50,50),   # a axis
+    #-100,
+    (-50,50),   # b axis
+    #100,        # c axis
+    #   -10,        # d axis
 ]
 
-# number of data points for each axis
-RESOLUTION = [1920,1080]
+# number of data points for each axisv
+#RESOLUTION = [100,100]
+RESOLUTION = [200, 200]
 
 # number of weights for integration. Set this to 0 in order to use the
 # continuous mode.
 NUM_WEIGHTS = 0
 
+# for integration method:
 # a grid of N_ROOTS**2 roots is calculated and then interpolated.
 # N_ROOTS=25 should be enough
-N_ROOTS = 25
+N_ROOTS_INT = 50
+
+# for method of steepest descent:
+N_ROOTS_STEEP = RESOLUTION[0]
 
 # display integration path in the complex plain for the first coordinate
 SHOW_INTEGRATION_PATH = False
@@ -60,7 +66,6 @@ CALCULATE_ARC_EVERY_N_STEPS = 100
 
 # neglected integral is proportional to exp(-D)
 D = 100
-
 # ==================================================
 
 assert (len(LIMITS) == ORDER - 2) and (len(RESOLUTION) == 2), \
@@ -113,23 +118,13 @@ expr_d = sp.diff(catastrophe, S)
 expr_dd = sp.diff(expr_d, S)
 expr_ddd = sp.diff(expr_dd, S)
 
-if ORDER == 4:
-    # find saddle points (dep. of S)
-    saddles_s = sp.solve(expr_d, S)
-
-    # calculate the value of the function and its derivatives at each saddle point
-    def _plug_in(expr, S, saddle_s, var):
-        expr = expr.subs(S, saddle_s)
-        return sp.lambdify(var, expr, [{'ImmutableMatrix': np.array}, 'numpy'])
-
-    val = [_plug_in(catastrophe, S, saddle_s, var) for saddle_s in saddles_s]
-    d = [_plug_in(expr_d, S, saddle_s, var) for saddle_s in saddles_s]
-    dd = [_plug_in(expr_dd, S, saddle_s, var) for saddle_s in saddles_s]
-    ddd = [_plug_in(expr_ddd, S, saddle_s, var) for saddle_s in saddles_s]
-
 # generate an integral representation for the caustic beam
 caustic_beam = sp.exp(1j * catastrophe)
 caustic_beam = sp.lambdify([S] + var, caustic_beam, 'numexpr')
+
+d_roots = [sp.lambdify(var, e) for e in sp.Poly(expr_d,S).all_coeffs()]
+val = sp.lambdify([S] + var, catastrophe, 'numexpr')
+dd = sp.lambdify([S] + var, expr_dd, 'numexpr')
 
 print '%f seconds' % (time() - t)
 
@@ -218,9 +213,9 @@ def integration_method():
     range_fine = [np.linspace(*l) for l in PLOT_LIMITS]
 
     # generade coarse grid for root calculation
-    slices2 = [slice(lim[0], lim[1], res > 1 and (N_ROOTS*1j) or 1j) for lim, res in zip(LIMITS, RESOLUTION)]
+    slices2 = [slice(lim[0], lim[1], res > 1 and (N_ROOTS_INT*1j) or 1j) for lim, res in zip(LIMITS, RESOLUTION)]
     grid_coarse = np.mgrid[slices2].astype(np.float)
-    range_coarse = [np.linspace(l[0], l[1], N_ROOTS) for l in PLOT_LIMITS]
+    range_coarse = [np.linspace(l[0], l[1], N_ROOTS_INT) for l in PLOT_LIMITS]
 
     # calculate a coarse grid of roots
     for c in zip(*[np.nditer(coord, op_flags=['readwrite']) for coord in grid_coarse]):
@@ -339,55 +334,69 @@ def integration_method():
 
     print '%f seconds' % (time() - t)
     return E
-
-
-# ======================= METHOD OF STEEPEST DESCENT =======================
-
+#======================================================================
 
 def steepest_descent():
-    # which axis is symmetric? Speeds up calculations
-    SYMMETRY = 0
-
     print 'METHOD OF STEEPEST DESCENT'
     t = time()
-    limits_s = np.copy(LIMITS)
-    resolution_s = np.copy(RESOLUTION)
 
-    if SYMMETRY is not None:
-        # calculate only half of the image for symmetry reasons
-        limits_s[SYMMETRY] = (limits_s[SYMMETRY][0], 0)
-        assert RESOLUTION[SYMMETRY] % 2 == 0, 'Resolution in symmetry direction has to be even'
-        resolution_s[SYMMETRY] = resolution_s[SYMMETRY] / 2
+    # generate fine grid
+    slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(LIMITS, RESOLUTION)]
+    grid_fine = np.mgrid[slices].astype(np.complex)
+    range_fine = [np.linspace(*l) for l in PLOT_LIMITS]
 
+    # generade coarse grid for root calculation
+    slices2 = [slice(lim[0], lim[1], res > 1 and (N_ROOTS_STEEP*1j) or 1j) for lim, res in zip(LIMITS, RESOLUTION)]
+    grid_coarse = np.mgrid[slices2].astype(np.float)
+    range_coarse = [np.linspace(l[0], l[1], N_ROOTS_STEEP) for l in PLOT_LIMITS]
+    roots_coarse = [np.zeros(grid_coarse[0].shape).astype(complex) for i in xrange(ORDER-1)]
 
-    def _saddle_contribution(val, dd, saddle_i, *positions):
+    # calculate a coarse grid of roots
+    for idx in np.ndindex(grid_coarse[0].shape):
+        #for c in zip(*[np.nditer(coord, op_flags=['readwrite']) for coord in grid_coarse]):
+        c = [g[idx] for g in grid_coarse]
+        tmp = [d(*c) for d in d_roots]
+        roots = np.roots(tmp)
+
+        for i, root in enumerate(roots):
+            roots_coarse[i][idx] = root
+
+    roots_coarse = [np.squeeze(roots_coarse[i]) for i in xrange(ORDER-1)]
+
+    # create fine grid for the roots by means of interpolation
+    intp = lambda mat: interpolate.RectBivariateSpline(range_coarse[0], range_coarse[1], mat)
+    f_real = [intp(np.real(root_coarse)) for root_coarse in roots_coarse]
+    f_imag = [intp(np.imag(root_coarse)) for root_coarse in roots_coarse]
+    intp2 = lambda fct: fct(range_fine[0], range_fine[1])
+    roots_fine = [intp2(f_real[i])+1j*intp2(f_imag[i]) for i in xrange(ORDER-1)]
+
+    # we have to expand the dimension of the grid again
+    for i, l in enumerate(LIMITS):
+        if i not in PLOT_AXES:
+            roots_fine = [np.expand_dims(r, axis=i) for r in roots_fine]
+
+    def _saddle_contribution(saddle_i, grid_fine):
         """
         Calculates the contribution to the E-field of each saddle.
         """
-        val = val[saddle_i](*positions)
-        deriv = dd[saddle_i](*positions)
+        value = val(roots_fine[saddle_i], *grid_fine)
+        deriv = dd(roots_fine[saddle_i], *grid_fine)
 
         ang = np.angle(deriv)
         theta_ = (np.pi - ang) / 2
-
-        if saddle_i == 1:
-            theta_[theta_ > np.pi/2] -= np.pi
-
-        return np.exp(1j * (val + theta_)) * np.sqrt(2*np.pi/abs(deriv))
-
-    # create the grid
-    slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(limits_s, resolution_s)]
-    positions = np.mgrid[slices].astype(complex)
+        theta_ = np.arcsin(np.sin(theta_))
+        #return deriv
+        ret = np.exp(1j * (value + theta_)) * np.sqrt(2*np.pi/np.abs(deriv))
+        ret[abs(ret)>1] = 0
+        ret[np.isnan(ret)] = 0
+        return ret
 
     # calculate E field
-    E_s = sum(_saddle_contribution(val, dd, i, *positions) for i,s in enumerate(saddles_s))
-    E_s[np.isnan(E_s)] = 0
-
-    # make use of symmetry
-    stack = (PLOT_AXES.index(SYMMETRY) == 0) and np.vstack or np.hstack
+    E_s = sum(_saddle_contribution(i, grid_fine) for i in xrange(ORDER-1))
 
     print '%f seconds' % (time() - t)
-    return stack((E_s, np.flipud(E_s))).T
+    return np.squeeze(E_s.T)
+
 
 
 # ============================= PLOTS =============================
@@ -439,7 +448,7 @@ def plot(E_i, E_s, preview=False):
         plt.xlabel(lowercase[PLOT_AXES[0]])
         plt.ylabel(lowercase[PLOT_AXES[1]])
 
-    _plot(I, 0, None, 1)
+    _plot(I, 0, 5, 1)
     _plot(ang, -np.pi, np.pi, 2)
 
 
@@ -478,7 +487,7 @@ if __name__ == '__main__':
 
     E_i = integration_method()
 
-    if not SHOW_INTEGRATION_PATH and ORDER == 4:
+    if not SHOW_INTEGRATION_PATH:
         E_s = steepest_descent()
     else:
         E_s = 0
