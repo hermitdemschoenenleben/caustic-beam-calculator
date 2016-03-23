@@ -20,15 +20,13 @@ from __builtin__ import sum
 # ================== CONFIGURATION ==================
 
 # the order of the catastrophe
-ORDER = 6
+ORDER = 4
 
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
-    100,
-    100,
-    (-200,200),
-    (-200,200),
+    (-50,50),
+    (-50,50),
 ]
 
 # number of data points for each axis
@@ -74,7 +72,7 @@ CALCULATE_ARC_EVERY_N_STEPS = 100
 D = 100
 
 # the maximum value in the plot
-PLOT_MAX = 0.5
+PLOT_MAX = 5
 # ==================================================
 
 assert (len(LIMITS) == ORDER - 2) and (len(RESOLUTION) == 2), \
