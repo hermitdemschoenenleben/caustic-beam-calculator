@@ -20,12 +20,14 @@ from __builtin__ import sum
 # ================== CONFIGURATION ==================
 
 # the order of the catastrophe
-ORDER = 4
+ORDER = 6
 
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
+    0,
     (-50,50),
+    0,
     (-50,50),
 ]
 
@@ -44,14 +46,14 @@ N_ROOTS = 100
 # (best results with N_ROOTS_STEEP == RESOLUTION)
 N_SADDLES = RESOLUTION[0]
 
-# Which criterion to use for merging the results of steepest descent method
+# Which THRESHOLDS to use for merging the results of steepest descent method
 # and integration method?
 # "saddle_distance" and "second_derivative" is possible
 # second part of the tuple is a threshold, higher values means that more pixels
 # are handled by integration method
-#CRITERION='saddle_distance', 0.5
-#CRITERION='second_derivative', 10
-CRITERION=0.5, 30
+#THRESHOLDS='saddle_distance', 0.5
+#THRESHOLDS='second_derivative', 10
+THRESHOLDS=0.5, 30
 
 # number of weights for integration. Set this to 0 in order to use the
 # continuous mode.
@@ -102,6 +104,7 @@ if NUM_WEIGHTS == 0:
 else:
     CONTINUOUS = False
 
+THRESHOLDS = list(THRESHOLDS)
 # ================== ANALYTICAL CALCULATIONS ==================
 print 'ANALYTICAL CALCULATIONS'
 # generate catastrophe
@@ -254,6 +257,12 @@ def integration_method():
     counter = 0
     s_values_used = []
 
+    # index of pixels that did not converge yet
+    not_converged = slice(None)
+    last = []
+
+    fact_line = np.ones(mat_line.shape)
+
     try:
         while True:
             if GAUSS:
@@ -263,9 +272,18 @@ def integration_method():
             else:
                 n_weights = NUM_WEIGHTS*2**counter
                 print 'Calculating %d weights' % n_weights
-                fact_line = 1.0 / n_weights
+                fact_line[not_converged] = 1.0 / n_weights
+
                 fact_arc = fact_line / CALCULATE_ARC_EVERY_N_STEPS
                 s_values = np.arange(0, 1, 1.0/n_weights)
+
+            #
+            mat_line_work = np.copy(mat_line[not_converged])
+            mat_arc_pos_work = np.copy(mat_arc_pos[not_converged])
+            mat_arc_neg_work = np.copy(mat_arc_neg[not_converged])
+            roots_fine_pos_work = np.copy(roots_fine_pos[not_converged])
+            roots_fine_neg_work = np.copy(roots_fine_neg[not_converged])
+            grid_fine_work = [np.copy(g[not_converged]) for g in grid_fine]
 
             # evaluate the function only at values of s that were not yet
             # evaluated
@@ -288,20 +306,38 @@ def integration_method():
                     expr = caustic_beam
 
                 # integration from -R_neg to R_pos
-                s_val = -roots_fine_neg + s * (roots_fine_pos+roots_fine_neg)
-                mat_line += w * expr(s_val, *grid_fine)
+                s_val = -roots_fine_neg_work + s * (roots_fine_pos_work+roots_fine_neg_work)
+                mat_line_work += w * expr(s_val, *grid_fine_work)
 
                 # use less steps for integration along the arc
                 if GAUSS or i % CALCULATE_ARC_EVERY_N_STEPS == 0:
                     # integration from R_pos along the arc
-                    s_val_pos = roots_fine_pos * np.exp(1j * s * angle_pos)
-                    mat_arc_pos += w * expr(s_val_pos, *grid_fine)
+                    s_val_pos = roots_fine_pos_work * np.exp(1j * s * angle_pos)
+                    mat_arc_pos_work += w * expr(s_val_pos, *grid_fine_work)
                     # integration from -R_neg along the arc
-                    s_val_neg = -roots_fine_neg * np.exp(1j * s * angle_neg)
-                    mat_arc_neg += w * expr(s_val_neg, *grid_fine)
+                    s_val_neg = -roots_fine_neg_work * np.exp(1j * s * angle_neg)
+                    mat_arc_neg_work += w * expr(s_val_neg, *grid_fine_work)
 
             if SHOW_INTEGRATION_PATH:
                 return
+
+            mat_line[not_converged] = mat_line_work
+            mat_arc_pos[not_converged] = mat_arc_pos_work
+            mat_arc_neg[not_converged] = mat_arc_neg_work
+
+            threshold = 0.001
+
+            if counter >= 2:
+                test = mat_line * fact_line
+                not_converged = (abs(test - last[-2]) > threshold) | \
+                                    (abs(test - last[-1]) > threshold)
+                remaining = len(not_converged[not_converged])
+            else:
+                remaining = mat_line.shape[0]
+
+            last.append(mat_line*fact_line);
+
+            print '%d pixels remaining' % remaining
 
             # calculate E field and remove empty extra dimensions
             E = (
@@ -320,6 +356,10 @@ def integration_method():
             else:
                 answer = False
 
+            if remaining == 0:
+                print "all pixels converged!"
+                break
+
             if SHOW_INTEGRATION_PATH or GAUSS or answer:
                 break
 
@@ -330,7 +370,7 @@ def integration_method():
         if not CONTINUOUS:
             raise KeyboardInterrupt()
 
-    print '%f seconds' % (time() - t)
+    print '%f seconds' % ((time() - t) / 1000)
     return E
 
 
@@ -371,7 +411,7 @@ def steepest_descent():
         for s in saddles_coarse
     ]
 
-    # evaluate the second derivative as criterion whether saddle approximation
+    # evaluate the second derivative as criterium whether saddle approximation
     # is valid
     dd_evaluated = np.array(
         [abs(np.squeeze(dd(r, *grid_fine))) for r in saddles_fine]
@@ -491,6 +531,36 @@ def show_complex_plain():
     plt.colorbar()
 
 
+def get_mask():
+    while True:
+        # pixels == 1 are handled by steepest descent method,
+        # pixels == 0 by integration method
+        mask = np.ones(E_s.shape)
+        # mask pixels with small minimal saddle distance
+        mask[saddle_distance < THRESHOLDS[0]] = 0
+        # mask pixels with small second derivative
+        mask[abs(dd_evaluated) < THRESHOLDS[1]] = 0
+        # mask diverging pixels
+        mask[abs(E_s)**2 > 10] = 0
+
+        # plot intensity and mask
+        plt.clf()
+        _plot(abs(E_s)**2, 0, PLOT_MAX, 1)
+        _plot(mask, 0, 1, 2)
+        plt.pause(0.5)
+
+        try:
+            inp = raw_input('Werte %f und %f ok? ' % (THRESHOLDS[0], THRESHOLDS[1]))
+            if not inp:
+                break
+            THRESHOLDS[0], THRESHOLDS[1] = [float(x) for x in inp.split(' ')]
+        except:
+            print 'Zwei Werte mit Leerzeichen getrennt eingeben'
+            continue
+
+    return mask.T
+
+
 if __name__ == '__main__':
     if SHOW_INTEGRATION_PATH:
         show_complex_plain()
@@ -500,25 +570,7 @@ if __name__ == '__main__':
 
     if not SHOW_INTEGRATION_PATH:
         E_s, saddle_distance, dd_evaluated = steepest_descent()
-        while True:
-            plt.clf()
-            mask = np.ones(E_s.shape)
-            CRITERION = list(CRITERION)
-            mask[saddle_distance < CRITERION[0]] = 0
-            mask[abs(dd_evaluated) < CRITERION[1]] = 0
-            mask[abs(E_s)**2 > 10] = 0
-            I = abs(E_s)**2
-            _plot(I, 0, PLOT_MAX, 1)
-            _plot(mask, 0, 1, 2)
-            plt.pause(0.5)
-            try:
-                inp = raw_input('Werte %f und %f ok? ' % (CRITERION[0], CRITERION[1]))
-                if not inp:
-                    break
-                CRITERION[0], CRITERION[1] = [float(x) for x in inp.split(' ')]
-            except:
-                continue
-        mask = mask.T
+        mask = get_mask()
     else:
         E_s = 0
 
