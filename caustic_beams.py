@@ -10,9 +10,9 @@ import pickle
 from time import time
 from string import lowercase
 from matplotlib import pyplot as plt
-from numpy.polynomial.legendre import leggauss
 from scipy.interpolate import RectBivariateSpline
 from itertools import combinations
+from multiprocessing import Process, Queue
 # spyder always imports the numpy version of sum, but we need the builtin
 # version
 from __builtin__ import sum
@@ -20,12 +20,12 @@ from __builtin__ import sum
 # ================== CONFIGURATION ==================
 
 # the order of the catastrophe
-ORDER = 6
+ORDER = 5
 
 # list of tuples with 2 elements each, corresponding to the limits of
 # the corresponding axis.
 LIMITS = [
-    0,
+    #0,
     (-50,50),
     0,
     (-50,50),
@@ -33,7 +33,7 @@ LIMITS = [
 
 # number of data points for each axis
 #RESOLUTION = [100,100]
-RESOLUTION = [400, 400]
+RESOLUTION = [300, 300]
 
 # for integration method:
 # a grid of N_ROOTS_INT**2 roots is calculated and then interpolated.
@@ -62,10 +62,6 @@ NUM_WEIGHTS = 0
 # display integration path in the complex plain for the first coordinate
 SHOW_INTEGRATION_PATH = False
 
-# use Legendre-Gauss method? Usually, for high values of NUM_WEIGHTS, False
-# is better
-GAUSS = False
-
 # the contribution of the integral along the arc is normally very small.
 # Use less steps for faster calculation
 CALCULATE_ARC_EVERY_N_STEPS = 100
@@ -75,6 +71,9 @@ D = 100
 
 # the maximum value in the plot
 PLOT_MAX = 5
+
+# number of threads to use
+N_THREADS = 4
 # ==================================================
 
 assert (len(LIMITS) == ORDER - 2) and (len(RESOLUTION) == 2), \
@@ -100,7 +99,6 @@ PLOT_LIMITS = [(LIMITS[i][0], LIMITS[i][1], RESOLUTION[i]) for i in PLOT_AXES]
 if NUM_WEIGHTS == 0:
     NUM_WEIGHTS = 100
     CONTINUOUS = True
-    assert not GAUSS, 'continuous mode and gauss not possible'
 else:
     CONTINUOUS = False
 
@@ -140,30 +138,6 @@ dd = sp.lambdify([S] + var, expr_dd, 'numexpr')
 ddd = sp.lambdify([S] + var, expr_ddd, 'numexpr')
 
 # ========================== INTEGRATION METHOD ==========================
-def get_gauss_coefficients(N):
-    """
-    Returns N legendre gauss coefficients.
-    use a cache because calculating them for more than 1000 weights is very
-    time consuming.
-    """
-    cache = {}
-    try:
-        f = file('gauss_cache', 'r')
-        cache = pickle.load(f)
-        s_values, weights = cache[N]
-        f.close()
-    except (IOError, KeyError), e:
-        f = file('gauss_cache', 'w')
-        s_values, weights = leggauss(N)
-        cache[N] = (s_values, weights)
-        pickle.dump(cache, f)
-        f.close()
-
-    # change position range from [-1,1] to [0,1]
-    s_values = (s_values + 1) * 0.5
-    return s_values, weights
-
-
 def plot_integration_point(s):
     """
     Place a dot in the complex plain for SHOW_INTEGRATION_PATH.
@@ -265,33 +239,26 @@ def integration_method():
 
     try:
         while True:
-            if GAUSS:
-                s_values, weights = get_gauss_coefficients(NUM_WEIGHTS)
-                # proper scaling for legendre gauss integration
-                fact_line = fact_arc = 0.5
-            else:
-                n_weights = NUM_WEIGHTS*2**counter
-                print 'Calculating %d weights' % n_weights
-                fact_line[not_converged] = 1.0 / n_weights
+            n_weights = NUM_WEIGHTS*2**counter
+            print 'Calculating %d weights' % n_weights
+            fact_line[not_converged] = 1.0 / n_weights
 
-                fact_arc = fact_line / CALCULATE_ARC_EVERY_N_STEPS
-                s_values = np.arange(0, 1, 1.0/n_weights)
+            fact_arc = fact_line / CALCULATE_ARC_EVERY_N_STEPS
+            s_values = np.arange(0, 1, 1.0/n_weights)
 
-            #
-            mat_line_work = np.copy(mat_line[not_converged])
-            mat_arc_pos_work = np.copy(mat_arc_pos[not_converged])
-            mat_arc_neg_work = np.copy(mat_arc_neg[not_converged])
-            roots_fine_pos_work = np.copy(roots_fine_pos[not_converged])
-            roots_fine_neg_work = np.copy(roots_fine_neg[not_converged])
-            grid_fine_work = [np.copy(g[not_converged]) for g in grid_fine]
+            mat_line_work = (mat_line[not_converged])
+            mat_arc_pos_work = (mat_arc_pos[not_converged])
+            mat_arc_neg_work = (mat_arc_neg[not_converged])
+            roots_fine_pos_work = (roots_fine_pos[not_converged])
+            roots_fine_neg_work = (roots_fine_neg[not_converged])
+            grid_fine_work = [(g[not_converged]) for g in grid_fine]
 
             # evaluate the function only at values of s that were not yet
             # evaluated
             s_values_new = np.setdiff1d(s_values, s_values_used)
             N = len(s_values_new)
 
-            if not GAUSS:
-                weights = (1,) * len(s_values_new)
+            weights = (1,) * len(s_values_new)
 
             for i, s, w in zip(range(N), s_values_new, weights):
                 # display percentage
@@ -310,7 +277,7 @@ def integration_method():
                 mat_line_work += w * expr(s_val, *grid_fine_work)
 
                 # use less steps for integration along the arc
-                if GAUSS or i % CALCULATE_ARC_EVERY_N_STEPS == 0:
+                if i % CALCULATE_ARC_EVERY_N_STEPS == 0:
                     # integration from R_pos along the arc
                     s_val_pos = roots_fine_pos_work * np.exp(1j * s * angle_pos)
                     mat_arc_pos_work += w * expr(s_val_pos, *grid_fine_work)
@@ -349,7 +316,7 @@ def integration_method():
             plot(E, E_s)
             plt.pause(0.2)
 
-            if not CONTINUOUS and not GAUSS and not SHOW_INTEGRATION_PATH:
+            if not CONTINUOUS and not SHOW_INTEGRATION_PATH:
                 question = ('Anzahl Gewichte auf %d verdoppeln (j/N)? ' %
                             (NUM_WEIGHTS*2**(counter+1)))
                 answer = raw_input(question) not in ['y', 'j']
@@ -360,7 +327,7 @@ def integration_method():
                 print "all pixels converged!"
                 break
 
-            if SHOW_INTEGRATION_PATH or GAUSS or answer:
+            if SHOW_INTEGRATION_PATH or answer:
                 break
 
             s_values_used += list(s_values)
@@ -386,7 +353,58 @@ def steepest_descent():
     # contains a matrix of the minimum saddle distance
     saddle_distance_coarse = np.zeros(grid_coarse[0].shape)
 
-    # calculate a coarse grid of saddle point positions
+    indices = list(np.ndindex(grid_coarse[0].shape))
+    per_thread = int(round(len(indices) / N_THREADS))
+
+    processes = []
+
+    def f(q, ind_thread, sc, sd):
+        saddles_coarse_t = np.copy(sc)
+        saddle_distance_coarse_t = np.copy(sd)
+
+        for idx in ind_thread:
+            coord = [g[idx] for g in grid_coarse]
+            # get saddle points
+            saddles = np.roots([coeff(*coord) for coeff in saddle_coefficients])
+            # sort saddles
+            saddles = sorted(saddles, key=lambda x: (np.imag(x), np.real(x), abs(x)))
+
+            for i, saddle in enumerate(saddles):
+                saddles_coarse_t[i][idx] = saddle
+
+            # calculate the distance between saddle points pairwise and find the
+            # minimal one
+            saddle_distance_coarse_t[idx] = min(
+                abs(co[0] - co[1]) for co in combinations(saddles, 2)
+            )
+
+        q.put([saddles_coarse_t, saddle_distance_coarse_t])
+
+    index_list = []
+
+    for thread in xrange(N_THREADS):
+        index_list.append(indices[thread*per_thread:((thread+1)*per_thread - 1)])
+
+        q = Queue()
+        p = Process(target=f, args=(q, index_list[-1], saddles_coarse, saddle_distance_coarse))
+        p.start()
+        processes.append((q,p))
+
+    for i, qp in enumerate(processes):
+        q, p = qp
+        saddles_coarse_t, saddle_distance_coarse_t = q.get()
+
+        ind_thread = index_list[i]
+        for idx in ind_thread:
+            saddle_distance_coarse[idx] = saddle_distance_coarse_t[idx]
+
+        for j, saddle in enumerate(saddles_coarse_t):
+            for idx in ind_thread:
+                saddles_coarse[j][idx] = saddle[idx]
+        p.join()
+
+
+    """# calculate a coarse grid of saddle point positions
     for idx in np.ndindex(grid_coarse[0].shape):
         coord = [g[idx] for g in grid_coarse]
         # get saddle points
@@ -401,7 +419,7 @@ def steepest_descent():
         # minimal one
         saddle_distance_coarse[idx] = min(
             abs(co[0] - co[1]) for co in combinations(saddles, 2)
-        )
+        )"""
 
     # interpolate coarse matrices
     saddle_distance_fine = interpolate(range_coarse, range_fine, saddle_distance_coarse)
