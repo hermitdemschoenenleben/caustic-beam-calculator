@@ -6,9 +6,9 @@ Author: Benjamin Wiegand, highwaychile@zoho.com
 """
 import sympy as sp
 import numpy as np
-import pickle
 from time import time
 from string import lowercase
+from scipy.io import savemat
 from matplotlib import pyplot as plt
 from scipy.interpolate import RectBivariateSpline
 from itertools import combinations
@@ -16,55 +16,60 @@ from multiprocessing import Process, Queue
 # spyder always imports the numpy version of sum, but we need the builtin
 # version
 from __builtin__ import sum
+from copy import copy
 
 # ================== CONFIGURATION ==================
-
-# the order of the catastrophe
-ORDER = 5
-
 # list of tuples with 2 elements each, corresponding to the limits of
-# the corresponding axis.
+# the corresponding axis. The length of the LIMITS list determines whether
+# pearcey beam (2 elements), swallowtail (3) or butterfly (4) is calculated.
 LIMITS = [
-    #0,
-    (-50,50),
-    0,
-    (-50,50),
+    (-300,300),
+    #-100,
+    (-300,300),
 ]
 
+# save results to file
+FILENAME = 'results.mat'
+
 # number of data points for each axis
-#RESOLUTION = [100,100]
-RESOLUTION = [300, 300]
+RESOLUTION = [100,100]
+#RESOLUTION = [1920, 1080]
 
 # for integration method:
-# a grid of N_ROOTS_INT**2 roots is calculated and then interpolated.
-# N_ROOTS_INT=100 should be enough
-N_ROOTS = 100
+# a grid of N_ROOTS roots is calculated and then interpolated.
+# N_ROOTS=[100,100] should be enough
+N_ROOTS = [100,100]
 
 # for method of steepest descent:
-# a grid of N_ROOTS_STEEP**2 saddle points is calculated and then interpolated.
+# a grid of N_SADDLES saddle points is calculated and then interpolated.
 # if you see artefacts, use a higher number
-# (best results with N_ROOTS_STEEP == RESOLUTION)
-N_SADDLES = RESOLUTION[0]
+# (best results with N_SADDLES == copy(RESOLUTION))
+N_SADDLES = copy(RESOLUTION)
 
-# Which THRESHOLDS to use for merging the results of steepest descent method
+# Which thresholds to use for merging the results of steepest descent method
 # and integration method?
-# "saddle_distance" and "second_derivative" is possible
-# second part of the tuple is a threshold, higher values means that more pixels
-# are handled by integration method
-#THRESHOLDS='saddle_distance', 0.5
-#THRESHOLDS='second_derivative', 10
+# Two methods are used:
+#   - minimum saddle distance: if the minimum distance between two saddles is
+#     smaller than the first threshold, the point is masked for later
+#     re-calculation by means of the integration method
+#   - second derivative: if the evaluation of the second derivative at a point
+#     is lower than the second threshold for one or more saddles, this point
+#     will be calculated using integration method.
 THRESHOLDS=0.5, 30
 
 # number of weights for integration. Set this to 0 in order to use the
 # continuous mode.
 NUM_WEIGHTS = 0
 
-# display integration path in the complex plain for the first coordinate
+# display integration path in the complex plain
 SHOW_INTEGRATION_PATH = False
 
 # the contribution of the integral along the arc is normally very small.
 # Use less steps for faster calculation
 CALCULATE_ARC_EVERY_N_STEPS = 100
+
+# number of threads to use for calculation of roots (method of steepest descent)
+N_THREADS = 4
 
 # neglected integral is proportional to exp(-D)
 D = 100
@@ -72,9 +77,16 @@ D = 100
 # the maximum value in the plot
 PLOT_MAX = 5
 
-# number of threads to use
-N_THREADS = 4
-# ==================================================
+# =============================================================================
+
+ORDER = len(LIMITS) + 2
+
+try:
+    beam = ['Pearcey', 'Swallowtail', 'Butterfly'][ORDER-4]
+except IndexError:
+    beam = ['Caustic beam of order %d' % ORDER]
+
+print 'CALCULATING %s' % beam
 
 assert (len(LIMITS) == ORDER - 2) and (len(RESOLUTION) == 2), \
     "not the right number of parameters"
@@ -195,10 +207,11 @@ def integration_method():
     # generate the grids
     grid_fine, range_fine, grid_coarse, range_coarse = generate_grids(N_ROOTS)
 
+    # these variables will contain the integration endpoints
     roots_coarse_pos = np.zeros(grid_coarse[0].shape)
     roots_coarse_neg = np.copy(roots_coarse_pos)
 
-    # calculate a coarse grid of roots
+    # calculate a coarse grid of roots (integration endpoints)
     for idx in np.ndindex(grid_coarse[0].shape):
         coord = [g[idx] for g in grid_coarse]
         r_pos, r_neg = get_highest_real_root(coord)
@@ -206,12 +219,15 @@ def integration_method():
         roots_coarse_pos[idx] = r_pos
         roots_coarse_neg[idx] = r_neg
 
-    # create fine grid for the roots by means of interpolation
+    # create fine grid for the roots (integration endpoints) by means of
+    # interpolation
     roots_fine_pos = interpolate(range_coarse, range_fine, roots_coarse_pos)
     roots_fine_neg = interpolate(range_coarse, range_fine, roots_coarse_neg)
 
-    # create flat arrays instead of matrices in order to only calculate the
-    # points included in mask
+    # filter the grid as well as the matrices for the integration endpoints:
+    # only pixels that were not calculated well by method of steepest descent
+    # should be included.
+    # This generates flat arrays instead of matrices.
     idx = mask == 0
     shape = len(mask[idx])
     roots_fine_neg = roots_fine_neg[idx]
@@ -228,39 +244,49 @@ def integration_method():
     angle_pos = np.pi / (2 * ORDER)
     angle_neg = ((-1) ** ORDER) * np.pi / (2 * ORDER)
 
+    # number of iterations
     counter = 0
+    # list of s values that were already evaluated
     s_values_used = []
 
     # index of pixels that did not converge yet
+    # is slice(None) at the beginning which means that all pixels are included
+    # at the beginning
     not_converged = slice(None)
-    last = []
 
+    # A list containing the result for the E field after each iteration step.
+    # This list is used to find out, which pixels did already converge.
+    history = []
+
+    # prefactor for integral calculation
     fact_line = np.ones(mat_line.shape)
 
     try:
         while True:
             n_weights = NUM_WEIGHTS*2**counter
             print 'Calculating %d weights' % n_weights
+
+            # prefactor for integral calculation using `n_weights` weights
             fact_line[not_converged] = 1.0 / n_weights
-
             fact_arc = fact_line / CALCULATE_ARC_EVERY_N_STEPS
+
+            # the s values where the function should be evaluated
             s_values = np.arange(0, 1, 1.0/n_weights)
-
-            mat_line_work = (mat_line[not_converged])
-            mat_arc_pos_work = (mat_arc_pos[not_converged])
-            mat_arc_neg_work = (mat_arc_neg[not_converged])
-            roots_fine_pos_work = (roots_fine_pos[not_converged])
-            roots_fine_neg_work = (roots_fine_neg[not_converged])
-            grid_fine_work = [(g[not_converged]) for g in grid_fine]
-
             # evaluate the function only at values of s that were not yet
-            # evaluated
+            # evaluated: subtract the s_values_used from s_values
             s_values_new = np.setdiff1d(s_values, s_values_used)
+            # number of evaluation points during this iteration
             N = len(s_values_new)
 
-            weights = (1,) * len(s_values_new)
+            # the _work variables contain only pixels that did not yet converge
+            mat_line_work = mat_line[not_converged]
+            mat_arc_pos_work = mat_arc_pos[not_converged]
+            mat_arc_neg_work = mat_arc_neg[not_converged]
+            roots_fine_pos_work = roots_fine_pos[not_converged]
+            roots_fine_neg_work = roots_fine_neg[not_converged]
+            grid_fine_work = [g[not_converged] for g in grid_fine]
 
-            for i, s, w in zip(range(N), s_values_new, weights):
+            for i, s in enumerate(s_values_new):
                 # display percentage
                 if i > 0 and i % (N/10) == 0:
                     print str(int(float(i) / N * 100)) + '%'
@@ -274,16 +300,16 @@ def integration_method():
 
                 # integration from -R_neg to R_pos
                 s_val = -roots_fine_neg_work + s * (roots_fine_pos_work+roots_fine_neg_work)
-                mat_line_work += w * expr(s_val, *grid_fine_work)
+                mat_line_work += expr(s_val, *grid_fine_work)
 
                 # use less steps for integration along the arc
                 if i % CALCULATE_ARC_EVERY_N_STEPS == 0:
                     # integration from R_pos along the arc
                     s_val_pos = roots_fine_pos_work * np.exp(1j * s * angle_pos)
-                    mat_arc_pos_work += w * expr(s_val_pos, *grid_fine_work)
+                    mat_arc_pos_work += expr(s_val_pos, *grid_fine_work)
                     # integration from -R_neg along the arc
                     s_val_neg = -roots_fine_neg_work * np.exp(1j * s * angle_neg)
-                    mat_arc_neg_work += w * expr(s_val_neg, *grid_fine_work)
+                    mat_arc_neg_work += expr(s_val_neg, *grid_fine_work)
 
             if SHOW_INTEGRATION_PATH:
                 return
@@ -296,13 +322,13 @@ def integration_method():
 
             if counter >= 2:
                 test = mat_line * fact_line
-                not_converged = (abs(test - last[-2]) > threshold) | \
-                                    (abs(test - last[-1]) > threshold)
+                not_converged = (abs(test - history[-2]) > threshold) | \
+                                    (abs(test - history[-1]) > threshold)
                 remaining = len(not_converged[not_converged])
             else:
                 remaining = mat_line.shape[0]
 
-            last.append(mat_line*fact_line);
+            history.append(mat_line*fact_line);
 
             print '%d pixels remaining' % remaining
 
@@ -353,12 +379,13 @@ def steepest_descent():
     # contains a matrix of the minimum saddle distance
     saddle_distance_coarse = np.zeros(grid_coarse[0].shape)
 
-    indices = list(np.ndindex(grid_coarse[0].shape))
-    per_thread = int(round(len(indices) / N_THREADS))
-
+    # multithreading
     processes = []
+    index_list = []
+    all_indices = list(np.ndindex(grid_coarse[0].shape))
+    per_thread = int(round(len(all_indices) / N_THREADS))
 
-    def f(q, ind_thread, sc, sd):
+    def do(q, ind_thread, sc, sd):
         saddles_coarse_t = np.copy(sc)
         saddle_distance_coarse_t = np.copy(sd)
 
@@ -380,46 +407,29 @@ def steepest_descent():
 
         q.put([saddles_coarse_t, saddle_distance_coarse_t])
 
-    index_list = []
-
     for thread in xrange(N_THREADS):
-        index_list.append(indices[thread*per_thread:((thread+1)*per_thread - 1)])
+        index_list.append(
+            all_indices[thread*per_thread:((thread+1)*per_thread - 1)]
+        )
 
         q = Queue()
-        p = Process(target=f, args=(q, index_list[-1], saddles_coarse, saddle_distance_coarse))
+        p = Process(target=do, args=(q, index_list[-1], saddles_coarse, saddle_distance_coarse))
         p.start()
         processes.append((q,p))
 
+    # collect results of threads
     for i, qp in enumerate(processes):
         q, p = qp
         saddles_coarse_t, saddle_distance_coarse_t = q.get()
 
         ind_thread = index_list[i]
+        # this loop would be not necessary, but it doesn't work without
         for idx in ind_thread:
             saddle_distance_coarse[idx] = saddle_distance_coarse_t[idx]
 
-        for j, saddle in enumerate(saddles_coarse_t):
-            for idx in ind_thread:
+            for j, saddle in enumerate(saddles_coarse_t):
                 saddles_coarse[j][idx] = saddle[idx]
         p.join()
-
-
-    """# calculate a coarse grid of saddle point positions
-    for idx in np.ndindex(grid_coarse[0].shape):
-        coord = [g[idx] for g in grid_coarse]
-        # get saddle points
-        saddles = np.roots([coeff(*coord) for coeff in saddle_coefficients])
-        # sort saddles
-        saddles = sorted(saddles, key=lambda x: (np.imag(x), np.real(x), abs(x)))
-
-        for i, saddle in enumerate(saddles):
-            saddles_coarse[i][idx] = saddle
-
-        # calculate the distance between saddle points pairwise and find the
-        # minimal one
-        saddle_distance_coarse[idx] = min(
-            abs(co[0] - co[1]) for co in combinations(saddles, 2)
-        )"""
 
     # interpolate coarse matrices
     saddle_distance_fine = interpolate(range_coarse, range_fine, saddle_distance_coarse)
@@ -466,15 +476,14 @@ def steepest_descent():
 
 def generate_grids(coarse_steps):
     # generate fine grids
+    range_fine = [np.linspace(*l) for l in PLOT_LIMITS]
     slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(LIMITS, RESOLUTION)]
     grid_fine = np.squeeze(np.mgrid[slices].astype(np.complex))
-    range_fine = [np.linspace(*l) for l in PLOT_LIMITS]
 
     # generade coarse grid for root calculation
-    slices2 = [slice(lim[0], lim[1], res > 1 and (coarse_steps*1j) or 1j) for lim, res in zip(LIMITS, RESOLUTION)]
+    range_coarse = [np.linspace(l[0], l[1], coarse_steps[i]) for i, l in enumerate(PLOT_LIMITS)]
+    slices2 = [slice(lim[0], lim[1], res > 1 and (coarse_steps.pop(0)*1j) or 1j) for lim, res in zip(LIMITS, RESOLUTION)]
     grid_coarse = np.squeeze(np.mgrid[slices2].astype(np.float))
-    range_coarse = [np.linspace(l[0], l[1], coarse_steps) for l in PLOT_LIMITS]
-
     return grid_fine, range_fine, grid_coarse, range_coarse
 
 
@@ -524,15 +533,17 @@ def plot(E_i_flat, E_s):
 
 
 def show_complex_plain():
+    # resolution for commplex plain
     res = 1000
-    pos = [l[0] for l in LIMITS]
 
+    pos = [l[0] for l in LIMITS]
     root_pos, root_neg = get_highest_real_root(pos)
 
+    # x and y limits for complex plain plot
     xl = (-root_neg - 1, root_pos + 1)
     yl = xl
 
-    # create complex grid
+    # create grid for complex plain
     g = np.mgrid[xl[0]:xl[1]:res*1j, yl[0]:yl[1]:res*1j]
     g = (g[0] + 1j*g[1]).T
 
@@ -544,6 +555,8 @@ def show_complex_plain():
 
     plt.clf()
     plt.pcolormesh(xran,yran,res,vmin=0,vmax=1)
+    plt.xlabel('Real axis')
+    plt.ylabel('Imaginary axis')
     plt.xlim(*xl)
     plt.ylim(*yl)
     plt.colorbar()
@@ -559,7 +572,7 @@ def get_mask():
         # mask pixels with small second derivative
         mask[abs(dd_evaluated) < THRESHOLDS[1]] = 0
         # mask diverging pixels
-        mask[abs(E_s)**2 > 10] = 0
+        mask[abs(E_s)**2 > 5] = 0
 
         # plot intensity and mask
         plt.clf()
@@ -568,12 +581,12 @@ def get_mask():
         plt.pause(0.5)
 
         try:
-            inp = raw_input('Werte %f und %f ok? ' % (THRESHOLDS[0], THRESHOLDS[1]))
+            inp = raw_input('Masken-Schwellwerte %f und %f ok? ' % (THRESHOLDS[0], THRESHOLDS[1]))
             if not inp:
                 break
             THRESHOLDS[0], THRESHOLDS[1] = [float(x) for x in inp.split(' ')]
         except:
-            print 'Zwei Werte mit Leerzeichen getrennt eingeben'
+            print 'Zwei Integer / Floats mit Leerzeichen getrennt eingeben'
             continue
 
     return mask.T
@@ -591,8 +604,18 @@ if __name__ == '__main__':
         mask = get_mask()
     else:
         E_s = 0
+        mask = np.zeros((2,2))
 
     E_i = integration_method()
 
     if not SHOW_INTEGRATION_PATH:
         E = plot(E_i, E_s)
+        dct = copy(locals())
+        if FILENAME:
+            vars_to_save = ['E', 'E_i', 'E_s', 'saddle_distance', 'dd_evaluated',
+                'mask', 'LIMITS', 'RESOLUTION', 'N_ROOTS', 'N_SADDLES', 'THRESHOLDS',
+                'NUM_WEIGHTS', 'SHOW_INTEGRATION_PATH', 'CALCULATE_ARC_EVERY_N_STEPS',
+                'N_THREADS', 'D', 'ORDER']
+            savemat(FILENAME, {
+                key: dct[key] for key in vars_to_save
+            })
