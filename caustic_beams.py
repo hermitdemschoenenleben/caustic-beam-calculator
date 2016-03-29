@@ -24,7 +24,7 @@ from copy import copy
 # pearcey beam (2 elements), swallowtail (3) or butterfly (4) is calculated.
 LIMITS = [
     (-300,300),
-    #-100,
+    -100,
     (-300,300),
 ]
 
@@ -32,7 +32,7 @@ LIMITS = [
 FILENAME = 'results.mat'
 
 # number of data points for each axis
-RESOLUTION = [100,100]
+RESOLUTION = [200,200]
 #RESOLUTION = [1920, 1080]
 
 # for integration method:
@@ -141,7 +141,7 @@ caustic_beam = sp.exp(1j * catastrophe)
 caustic_beam = sp.lambdify([S] + var, caustic_beam, 'numexpr')
 
 # coefficients of S in derivative
-saddle_coefficients = [sp.lambdify(var, e) for e in sp.Poly(expr_d,S).all_coeffs()]
+saddle_coefficients = sp.lambdify(var, sp.Poly(expr_d,S).all_coeffs(), 'numpy')
 
 # "compile" expressions for fast computation
 val = sp.lambdify([S] + var, catastrophe, 'numexpr')
@@ -385,14 +385,21 @@ def steepest_descent():
     all_indices = list(np.ndindex(grid_coarse[0].shape))
     per_thread = int(round(len(all_indices) / N_THREADS))
 
-    def do(q, ind_thread, sc, sd):
-        saddles_coarse_t = np.copy(sc)
-        saddle_distance_coarse_t = np.copy(sd)
+    def do(q, ind_thread, thread_num):
+        saddles_coarse_t = np.copy(saddles_coarse)
+        saddle_distance_coarse_t = np.copy(saddle_distance_coarse)
 
-        for idx in ind_thread:
+        N = len(ind_thread)
+
+        for i, idx in enumerate(ind_thread):
+            # display percentage
+            if thread_num == 0 and i > 0 and i % (N/10) == 0:
+                print 'Thread 1: ', str(int(float(i) / N * 100)) + '%'
+
             coord = [g[idx] for g in grid_coarse]
             # get saddle points
-            saddles = np.roots([coeff(*coord) for coeff in saddle_coefficients])
+            # saddles = np.roots(saddle_coefficients(*coord))
+            saddles = np.roots([s(*coord) for s in saddle_coefficients(*coord)])
             # sort saddles
             saddles = sorted(saddles, key=lambda x: (np.imag(x), np.real(x), abs(x)))
 
@@ -413,7 +420,7 @@ def steepest_descent():
         )
 
         q = Queue()
-        p = Process(target=do, args=(q, index_list[-1], saddles_coarse, saddle_distance_coarse))
+        p = Process(target=do, args=(q, index_list[-1], thread))
         p.start()
         processes.append((q,p))
 
