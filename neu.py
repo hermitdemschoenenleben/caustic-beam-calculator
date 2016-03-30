@@ -12,23 +12,11 @@ from matplotlib.cm import ScalarMappable
 LIMITS = [
     (-100,100),
     (-100,100),
-    0,
+    (-100,100),
 ]
 ORDER = 5
 
-# convert integer limits to tuples
-LIMITS = [(l,l) if type(l) is int else l for l in LIMITS]
-
-RESOLUTION = [400,400]
-# expand RESOLUTION to ORDER-2 dimensions
-for i, l in enumerate(LIMITS):
-    if l[0] == l[1]:
-        RESOLUTION.insert(i, 1)
-
-fig = plt.gcf()
-plt.clf()
-ax = fig.add_subplot(111, projection='3d')
-
+RESOLUTION = [100,100,20]
 
 # list of generated variables
 var = []
@@ -44,40 +32,26 @@ for i in xrange(ORDER - 2):
 # calculate derivatives
 expr_d = sp.diff(catastrophe, S)
 expr_dd = sp.diff(expr_d, S)
-expr_ddd = sp.diff(expr_dd, S)
-
-# generate an integral representation for the caustic beam
-caustic_beam = sp.exp(1j * catastrophe)
-# "compile for fast computation
-caustic_beam = sp.lambdify([S] + var, caustic_beam, 'numexpr')
 
 # coefficients of S in derivative
 saddle_coefficients = sp.lambdify(var, sp.Poly(expr_d,S).all_coeffs(), 'numpy')
 
 # "compile" expressions for fast computation
-val = sp.lambdify([S] + var, catastrophe, 'numexpr')
-d = sp.lambdify([S] + var, expr_d, 'numexpr')
 dd = sp.lambdify([S] + var, expr_dd, 'numexpr')
-ddd = sp.lambdify([S] + var, expr_ddd, 'numexpr')
 
-#vals = [-20, 0, 20]
-vals = np.linspace(-100,100,50)
+X = [[] for i in xrange(ORDER-1)]
+Y = [[] for i in xrange(ORDER-1)]
+Z = [[] for i in xrange(ORDER-1)]
 
 
-#saddles = []
-"""X = []
-Y = []
-Z = []
-"""
+saddles = []
 
 for i, value in enumerate(vals):
-    if i < 20:
-        continue
     LIMITS[2] = (value, value)
     slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(LIMITS, RESOLUTION)]
     grid = np.squeeze(np.mgrid[slices].astype(np.complex))
 
-    """saddles_m = [np.zeros(grid[0].shape).astype(complex) for p in xrange(ORDER-1)]
+    saddles_m = [np.zeros(grid[0].shape).astype(complex) for p in xrange(ORDER-1)]
     print i
 
     test = np.zeros(grid[0].shape)
@@ -87,7 +61,7 @@ for i, value in enumerate(vals):
             saddles_m[i][idx] = s
 
     saddles.append(saddles_m)
-    continue"""
+    continue
 
     saddles_m = saddles[i]
 
@@ -107,9 +81,9 @@ for i, value in enumerate(vals):
 
         arr = filters.minimum_filter1d(arr, 5) == arr
         return arr.astype(int)
-
-    res = np.zeros(grid[0].shape)
+    results = []
     for k, dd_ in enumerate(dd_evaluated):
+        res = np.zeros(grid[0].shape)
         result_col = np.copy((dd_))
         result_row = np.copy((dd_)).T
 
@@ -122,16 +96,23 @@ for i, value in enumerate(vals):
         result = result_row + result_col.T
         result[result < 1] = 0
         result[result > 0] = 1
-        result[abs(dd_.T)>10] = 0
+        result[abs(dd_.T)>20] = 0
         res[result>0] = 1
-        plt.clf()
+        results += [res]
+
+        idx = res > 0
+        height = (value,)*len(idx[idx])
+        X[k] += list(grid[0][idx])
+        Y[k] += list(grid[1][idx])
+        Z[k] += list(height)
+        """plt.clf()
         plt.pcolormesh((dd_.T), vmin=-10, vmax=10)
         plt.colorbar()
         plt.pause(0.1)
         raw_input('')
         plt.pcolormesh(result)
         plt.pause(0.1)
-        raw_input('')
+        raw_input('')"""
     """plt.clf()
     plt.pcolormesh(res)
     plt.pause(0.1)
@@ -141,11 +122,17 @@ for i, value in enumerate(vals):
 
     #res *= (i+1)
     #v.append(res)
-    idx = res > 0
+    """idx = res > 0
     height = (value,)*len(idx[idx])
     X += list(grid[0][idx])
     Y += list(grid[1][idx])
-    Z += list(height)
+    Z += list(height)"""
+
+
+fig = plt.gcf()
+plt.clf()
+ax = fig.add_subplot(111, projection='3d')
+
 
 def scatter3d(x,y,z, cs, colorsMap='jet'):
     cm = plt.get_cmap(colorsMap)
@@ -155,35 +142,70 @@ def scatter3d(x,y,z, cs, colorsMap='jet'):
     scalarMap.set_array(cs)
     fig.colorbar(scalarMap)
     plt.show()
-print '!PLOT'
-skip = 1
-scatter3d(X[::skip], Z[::skip], Y[::skip], Y[::skip])
+
+def do_scatter(num, cmap=None):
+    x = X[num]
+    y = Y[num]
+    z = Z[num]
+    skip = 1
+    scatter3d(x[::skip], z[::skip], y[::skip], y[::skip], cmap)
+
+do_scatter(1)
+
+def nan_helper(y):
+    return np.isnan(y), lambda z: z.nonzero()[0]
+
+def do_solid(num, half):
+    x = X[num]
+    y = Y[num]
+    z = Z[num]
+
+    new = np.zeros((len(vals), grid[0].shape[0]))
+    new[:] = np.nan
+
+    for x_, y_, z_ in zip(x,y,z):
+        idx1 = np.where(grid[0][:,0] == x_)
+        idx2 = np.where(vals==z_)
+        if np.isnan(new[idx2,idx1]):
+            new[idx2,idx1] = y_
+        else:
+            print 'doppelt'
+
+    N = 24
+    def sl1(arr):
+        if half is None:
+            return arr
+        return arr[half*N:(half+1)*N-1,:]
+    def sl2(arr):
+        if half is None:
+            return arr
+        return arr[half*N:(half+1)*N-1]
+
+    new = sl1(new)
+
+    for i, row in enumerate(new.T):
+        nans, x= nan_helper(row)
+        row[nans]= np.interp(x(nans), x(~nans), row[~nans])
+        new[:,i] = row
+
+    new_grid = np.meshgrid(grid[0][:,0], sl2(vals))
+
+    test = np.copy(new)
+    test[np.isnan(test)] = 0
+    norm = Normalize(vmin = np.min(test), vmax = np.max(test), clip = False)
+
+    ax.plot_surface(new_grid[0], new_grid[1], new,
+        rstride=2, cstride=2, cmap=cm.coolwarm, linewidth=0, antialiased=False, norm=norm)
+
+#do_solid(3,0)
+#do_solid(3,1)
+do_scatter(3)
+#do_solid(1,None)
 
 ax.set_xlabel('A1')
 ax.set_ylabel('A3')
 ax.set_zlabel('A2')
 
-new = np.zeros((len(vals), grid[0].shape[0]))
-new[:] = np.nan
-
-for x, y, z in zip(X, Y, Z):
-    idx1 = np.where(grid[0][:,0] == x)
-    idx2 = np.where(abs(vals-z)<0.001)
-    if np.isnan(new[idx2,idx1]) or new[idx2,idx1] < y:
-        new[idx2,idx1] = y
-
-#plt.clf()
-new2 = pd.DataFrame(new).interpolate(method='linear', axis=0).values
-#new2[np.isnan(new2)] = 0
-
-new_grid = np.meshgrid(grid[0][:,0], vals)
-
-test = np.copy(new2)
-test[np.isnan(test)] = 0
-norm = Normalize(vmin = np.min(test), vmax = np.max(test), clip = False)
-
-ax.plot_surface(new_grid[0][25:,:], new_grid[1][25:,:], new2[25:,:],
-                rstride=5, cstride=5, cmap=cm.coolwarm, linewidth=0, antialiased=False, norm=norm)
 """ax.plot_surface(new_grid[0][:, 101:], new_grid[1][:, 101:], new2[:, 101:],
                 rstride=5, cstride=5, cmap=cm.coolwarm, linewidth=0, antialiased=False, norm=norm)"""
 
