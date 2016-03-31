@@ -6,21 +6,23 @@ from matplotlib import pyplot as plt
 from scipy.signal import argrelextrema
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
-
+from matplotlib import cm
+from mpl_toolkits.mplot3d import axes3d, Axes3D
 
 LIMITS = [
-    (-100,100),
-    (-100,100),
-    (-100,100),
-]
-PLOT_LIMITS = [
     (-50,50),
     (-50,50),
     (-50,50),
 ]
-RESOLUTION = [200,200,200]
+"""PLOT_LIMITS = [
+    (-50,50),
+    (-50,50),
+    (-50,50),
+]"""
+PLOT_LIMITS = LIMITS
+RESOLUTION = [300,300,25]
 ORDER = 5
-AXIS = 2
+AXIS = 2 # XXX: can't change this without breaking code
 
 # list of generated variables
 var = []
@@ -43,9 +45,10 @@ saddle_coefficients = sp.lambdify(var, sp.Poly(expr_d,S).all_coeffs(), 'numpy')
 # "compile" expressions for fast computation
 dd = sp.lambdify([S] + var, expr_dd, 'numexpr')
 
-X = [[] for i in xrange(ORDER-1)]
+
+"""X = [[] for i in xrange(ORDER-1)]
 Y = [[] for i in xrange(ORDER-1)]
-Z = [[] for i in xrange(ORDER-1)]
+Z = [[] for i in xrange(ORDER-1)]"""
 
 def find_min(arr):
     mn = argrelextrema(arr, np.less)
@@ -57,19 +60,20 @@ def find_min(arr):
 slices = [slice(lim[0], lim[1], res*1j) for lim, res in zip(LIMITS, RESOLUTION)]
 grid = np.squeeze(np.mgrid[slices].astype(np.complex))
 
-saddles = [np.zeros(grid[0].shape).astype(complex) for p in xrange(ORDER-1)]
+"""saddles = [np.zeros(grid[0].shape).astype(complex) for p in xrange(ORDER-1)]
 
 indices = list(np.ndindex(grid[0].shape))
 for i, idx in enumerate(indices):
     if i % 100000 == 0:
-        print '%f percent ' % (float(i) * 100 / len(indices))
+        print 'step 1: %f %% ' % (float(i) * 100 / len(indices))
 
     coord = [g[idx] for g in grid]
     for i, s in enumerate(np.roots(saddle_coefficients(*coord))):
-        saddles[i][idx] = s
+        saddles[i][idx] = s"""
 
 
 for saddle_i, saddle in enumerate(saddles):
+    break
     dd_evaluated = np.array(
         abs(dd(saddle, *grid))
     )
@@ -93,7 +97,7 @@ for saddle_i, saddle in enumerate(saddles):
         result = result_row + result_col.T
         result[result < 1] = 0
         result[result > 0] = 1
-        result[abs(dd_2d.T)>20] = 0
+        result[abs(dd_2d.T)>10] = 0
 
         idx = result > 0
 
@@ -128,42 +132,46 @@ for saddle_i, saddle in enumerate(saddles):
 
 fig = plt.gcf()
 plt.clf()
-ax = fig.add_subplot(111, projection='3d')
+ax = Axes3D(fig)
+#ax = fig.add_subplot(111, projection='3d')
 
 
 def scatter3d(x,y,z, cs, colorsMap='jet'):
     cm = plt.get_cmap(colorsMap)
     cNorm = Normalize(vmin=min(cs), vmax=max(cs))
     scalarMap = ScalarMappable(norm=cNorm, cmap=cm)
-    ax.scatter(x, y, z, c=scalarMap.to_rgba(cs), s=2, linewidth=0)
+    ax.scatter(x, y, z, c=scalarMap.to_rgba(cs), s=5, linewidth=0)
     scalarMap.set_array(cs)
-    fig.colorbar(scalarMap)
+    #fig.colorbar(scalarMap)
     plt.show()
 
 def do_scatter(num, cmap=None):
-    x = X[num]
-    y = Y[num]
-    z = Z[num]
+    x = np.array(X[num])
+    y = np.array(Y[num])
+    z = np.array(Z[num])
 
-    def plot_range_filter(arr, idx):
-        return arr[arr > PLOT_LIMITS[idx] & arr < PLOT_LIMITS[idx]]
+    def plot_range_filter(*pos):
+        pos = list(pos)
+        for i, l in enumerate(PLOT_LIMITS):
+            idx = (pos[i] > l[0]) & (pos[i] < l[1])
+            for j, p in enumerate(pos):
+                pos[j] = pos[j][idx]
 
-    x = plot_range_filter(x, 0)
-    y = plot_range_filter(y, 1)
-    z = plot_range_filter(z, 2)
+        return pos
 
+    x, y, z = plot_range_filter(x, y, z)
     skip = 1
     scatter3d(x[::skip], z[::skip], y[::skip], y[::skip], cmap)
 
-do_scatter(1)
+#do_scatter(1)
 
-def nan_helper(y):
-    return np.isnan(y), lambda z: z.nonzero()[0]
+def nan_helper(w):
+    return np.isnan(w), lambda q: q.nonzero()[0]
 
-def do_solid(num, half):
-    x = X[num]
-    y = Y[num]
-    z = Z[num]
+def do_solid(num, interpolate, half, options):
+    x = np.array(X[num])
+    y = np.array(Y[num])
+    z = np.array(Z[num])
 
     new = np.zeros((grid[0].shape[2], grid[0].shape[0]))
     new[:] = np.nan
@@ -171,43 +179,79 @@ def do_solid(num, half):
     for x_, y_, z_ in zip(x,y,z):
         idx1 = np.where(grid[0][:,0,0] == x_)
         idx2 = np.where(grid[2][0,0,:] == z_)
-        if np.isnan(new[idx2,idx1]):
-            new[idx2,idx1] = y_
+        test = new[idx2,idx1]
+        if np.isnan(test):
+            if half is None or ((half == 0) and (y_ > 0)) or ((half == 1) and (y_ < 0)):
+                new[idx2,idx1] = y_
         else:
-            print 'doppelt'
+            pass
+            #print 'doppelt'
 
 
     def sl(arr):
-        N = RESOLUTION[AXIS] / 2
+        N = RESOLUTION[AXIS] / 2 - 1
 
         if half is None:
             return arr
-
         if len(arr.shape) > 1:
             return arr[half*N:(half+1)*N-1,:]
         else:
             return arr[half*N:(half+1)*N-1]
 
-    new = sl(new)
+    #new = sl(new)
+    if interpolate:
+        for i, row in enumerate(new):
+            nans, x_ = nan_helper(row)
+            try:
+                row[nans]= np.interp(x_(nans), x_(~nans), row[~nans])
+            except:
+                pass
 
-    for i, row in enumerate(new.T):
-        nans, x= nan_helper(row)
-        row[nans]= np.interp(x(nans), x(~nans), row[~nans])
-        new[:,i] = row
+        for r, row in enumerate(new):
+            start = row[0]
+            end = row[-1]
 
-    new_grid = np.meshgrid(grid[0][:,0,0], sl(grid[2][0,0,:]))
+            for c, cell in enumerate(row):
+                if cell != start:
+                    new[r, 0:c] = np.nan
+                    break
+                if c == len(row) - 1:
+                    new[r, :] = np.nan
 
+            for c, cell in enumerate(reversed(row)):
+                if cell != end:
+                    new[r, -c:] = np.nan
+                    break
+
+    new_grid = np.meshgrid(grid[0][:,0,0], grid[2][0,0,:])
+    #new = ndimage.filters.gaussian_filter(new, 1, mode='nearest')
+
+    """plt.clf()
+    new[np.isnan(new)] = 20
+    plt.pcolormesh(new)
+    asd"""
     test = np.copy(new)
     test[np.isnan(test)] = 0
     norm = Normalize(vmin = np.min(test), vmax = np.max(test), clip = False)
+    ax.plot_surface(new_grid[0], new_grid[1], new, **options)
 
-    ax.plot_surface(new_grid[0], new_grid[1], new,
-        rstride=2, cstride=2, cmap=cm.coolwarm, linewidth=0, antialiased=False, norm=norm)
+options = {
+    'alpha':        0.5,
+    'rstride':      5,
+    'cstride':      5,
+    'color':        'b',
+}
 
-#do_solid(3,0)
-#do_solid(3,1)
-do_scatter(3)
-#do_solid(1,None)
+
+#do_solid(3, True, 0, options)
+#do_solid(3, True, 1, options)
+"""do_solid(1, False, None, {
+    'color':        'r',
+    'alpha':        0.5,
+})"""
+
+do_scatter(1, 'Reds')
+do_scatter(3, 'Blues')
 
 ax.set_xlabel('A1')
 ax.set_ylabel('A3')
