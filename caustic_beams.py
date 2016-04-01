@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Calculate caustic beams.
+Calculate E-field of caustic beams.
 
 Author: Benjamin Wiegand, highwaychile@zoho.com
 """
@@ -20,10 +20,9 @@ from copy import copy
 # the corresponding axis. The length of the LIMITS list determines whether
 # pearcey beam (2 elements), swallowtail (3) or butterfly (4) is calculated.
 LIMITS = [
-    -200,
-    200,
     (-200,200),
     (-200,200),
+    100,
 ]
 
 # save results to file
@@ -33,16 +32,21 @@ FILENAME = 'results.mat'
 RESOLUTION = [400,400]
 #RESOLUTION = [1920, 1080]
 
+# the maximum value in the plot
+PLOT_MAX = 5
+
 # for integration method:
 # a grid of N_ROOTS roots is calculated and then interpolated.
-# N_ROOTS=[100,100] should be enough
+# N_ROOTS=[100,100] should be enough, in case of artefacts use more points
 N_ROOTS = [100,100]
 
 # for method of steepest descent:
 # a grid of N_SADDLES saddle points is calculated and then interpolated.
-# if you see artefacts, use a higher number
+# For high resolutions you can use a number lower than resolution to speed up
+# calculations dramatically, if you see artefacts, use a higher number
 # (best results with N_SADDLES == copy(RESOLUTION))
-N_SADDLES = [r for r in copy(RESOLUTION)]
+N_SADDLES = copy(RESOLUTION)
+#N_SADDLES = [100, 100]
 
 # Which thresholds to use for merging the results of steepest descent method
 # and integration method?
@@ -71,9 +75,6 @@ N_THREADS = 4
 
 # neglected integral is proportional to exp(-D)
 D = 100
-
-# the maximum value in the plot
-PLOT_MAX = 2.5
 
 # integration method: if a point changes less than this quantity during two
 # iterations, it is regarded as converged
@@ -336,6 +337,10 @@ def integration_method(E_s, mask):
 
                 # integration from -R_neg to R_pos
                 s_val = -roots_fine_neg_work + s * (roots_fine_pos_work+roots_fine_neg_work)
+                # beispiel: Integriere von 0 bis positiven R
+                # s_val = s * (roots_fine_pos_work)
+                # -R bis 0:
+                # s_val = -roots_fine_neg_work + s * (roots_fine_neg_work)
                 mat_line_work += expr(s_val, *grid_fine_work)
 
                 # use less steps for integration along the arc
@@ -371,6 +376,13 @@ def integration_method(E_s, mask):
             print '%d pixels remaining' % remaining
 
             # calculate E field
+            """
+            Beispiel: Positive half
+            E = (
+                mat_line * fact_line * (roots_fine_pos) +
+                mat_arc_pos * fact_arc * roots_fine_pos * abs(angle_pos) / (2*np.pi)
+            )
+            """
             E = (
                 mat_line * fact_line * (roots_fine_pos + roots_fine_neg) +
                 mat_arc_pos * fact_arc * roots_fine_pos * abs(angle_pos) / (2*np.pi) +
