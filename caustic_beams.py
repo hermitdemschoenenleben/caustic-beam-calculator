@@ -13,9 +13,6 @@ from matplotlib import pyplot as plt
 from scipy.interpolate import RectBivariateSpline
 from itertools import combinations
 from multiprocessing import Process, Queue
-# spyder always imports the numpy version of sum, but we need the builtin
-# version
-from __builtin__ import sum
 from copy import copy
 
 # ================== CONFIGURATION ==================
@@ -23,16 +20,17 @@ from copy import copy
 # the corresponding axis. The length of the LIMITS list determines whether
 # pearcey beam (2 elements), swallowtail (3) or butterfly (4) is calculated.
 LIMITS = [
-    (-300,300),
-    -100,
-    (-300,300),
+    -200,
+    200,
+    (-200,200),
+    (-200,200),
 ]
 
 # save results to file
 FILENAME = 'results.mat'
 
 # number of data points for each axis
-RESOLUTION = [200,200]
+RESOLUTION = [400,400]
 #RESOLUTION = [1920, 1080]
 
 # for integration method:
@@ -44,7 +42,7 @@ N_ROOTS = [100,100]
 # a grid of N_SADDLES saddle points is calculated and then interpolated.
 # if you see artefacts, use a higher number
 # (best results with N_SADDLES == copy(RESOLUTION))
-N_SADDLES = copy(RESOLUTION)
+N_SADDLES = [r for r in copy(RESOLUTION)]
 
 # Which thresholds to use for merging the results of steepest descent method
 # and integration method?
@@ -75,7 +73,11 @@ N_THREADS = 4
 D = 100
 
 # the maximum value in the plot
-PLOT_MAX = 5
+PLOT_MAX = 2.5
+
+# integration method: if a point changes less than this quantity during two
+# iterations, it is regarded as converged
+CONVERGENCE_THRESHOLD = 0.001
 
 # =============================================================================
 
@@ -96,6 +98,8 @@ LIMITS = [(l,l) if type(l) is int else l for l in LIMITS]
 
 if SHOW_INTEGRATION_PATH:
     RESOLUTION = [2,2]
+
+PLOT_RESOLUTION = np.copy(RESOLUTION)
 
 # expand RESOLUTION to ORDER-2 dimensions
 for i, l in enumerate(LIMITS):
@@ -133,7 +137,6 @@ for i in xrange(ORDER - 2):
 # calculate derivatives
 expr_d = sp.diff(catastrophe, S)
 expr_dd = sp.diff(expr_d, S)
-expr_ddd = sp.diff(expr_dd, S)
 
 # generate an integral representation for the caustic beam
 caustic_beam = sp.exp(1j * catastrophe)
@@ -147,7 +150,40 @@ saddle_coefficients = sp.lambdify(var, sp.Poly(expr_d,S).all_coeffs(), 'numpy')
 val = sp.lambdify([S] + var, catastrophe, 'numexpr')
 d = sp.lambdify([S] + var, expr_d, 'numexpr')
 dd = sp.lambdify([S] + var, expr_dd, 'numexpr')
-ddd = sp.lambdify([S] + var, expr_ddd, 'numexpr')
+
+
+def start():
+    if SHOW_INTEGRATION_PATH:
+        show_complex_plain()
+        plt.set_cmap('gray')
+    else:
+        plt.set_cmap('jet')
+
+    if not SHOW_INTEGRATION_PATH:
+        E_s, saddle_distance, dd_evaluated = steepest_descent()
+        mask = ask_for_mask(E_s, saddle_distance, dd_evaluated)
+    else:
+        E_s = 0
+        mask = np.zeros((2,2))
+
+    E_i, new_mask = integration_method(E_s, mask)
+
+    if not SHOW_INTEGRATION_PATH:
+        E = plot(E_i, E_s, mask, new_mask)
+        dct = copy(locals())
+        dct.update(copy(globals()))
+        if FILENAME:
+            vars_to_save = ['E', 'E_i', 'E_s', 'saddle_distance', 'dd_evaluated',
+                'mask', 'LIMITS', 'RESOLUTION', 'N_ROOTS', 'N_SADDLES', 'THRESHOLDS',
+                'NUM_WEIGHTS', 'SHOW_INTEGRATION_PATH', 'CALCULATE_ARC_EVERY_N_STEPS',
+                'N_THREADS', 'D', 'ORDER']
+            savemat(FILENAME, {
+                key: dct[key] for key in vars_to_save
+            })
+    else:
+        E = None
+
+    return E, E_i, E_s
 
 # ========================== INTEGRATION METHOD ==========================
 def plot_integration_point(s):
@@ -200,7 +236,7 @@ def get_highest_real_root(pos):
            max(roots_neg[abs(np.imag(roots_neg)) == 0])
 
 
-def integration_method():
+def integration_method(E_s, mask):
     print 'INTEGRATION METHOD'
     t = time()
 
@@ -318,29 +354,30 @@ def integration_method():
             mat_arc_pos[not_converged] = mat_arc_pos_work
             mat_arc_neg[not_converged] = mat_arc_neg_work
 
-            threshold = 0.001
-
+            # check which pixels converged
             if counter >= 2:
                 test = mat_line * fact_line
-                not_converged = (abs(test - history[-2]) > threshold) | \
-                                    (abs(test - history[-1]) > threshold)
+                not_converged = (abs(test - history[-2]) > CONVERGENCE_THRESHOLD) | \
+                                    (abs(test - history[-1]) > CONVERGENCE_THRESHOLD)
                 remaining = len(not_converged[not_converged])
+                new_mask_flat = np.ones(mat_line.shape)
+                new_mask_flat[not_converged] = 0
             else:
                 remaining = mat_line.shape[0]
+                new_mask_flat = None
 
             history.append(mat_line*fact_line);
 
             print '%d pixels remaining' % remaining
 
-            # calculate E field and remove empty extra dimensions
+            # calculate E field
             E = (
                 mat_line * fact_line * (roots_fine_pos + roots_fine_neg) +
                 mat_arc_pos * fact_arc * roots_fine_pos * abs(angle_pos) / (2*np.pi) +
                 mat_arc_neg * fact_arc * roots_fine_neg * abs(angle_neg) / (2*np.pi)
             )
 
-            plot(E, E_s)
-            plt.pause(0.2)
+            plot(E, E_s, mask, new_mask_flat)
 
             if not CONTINUOUS and not SHOW_INTEGRATION_PATH:
                 question = ('Anzahl Gewichte auf %d verdoppeln (j/N)? ' %
@@ -364,7 +401,7 @@ def integration_method():
             raise KeyboardInterrupt()
 
     print '%f seconds' % ((time() - t) / 1000)
-    return E
+    return E, new_mask_flat
 
 
 def steepest_descent():
@@ -385,7 +422,10 @@ def steepest_descent():
     all_indices = list(np.ndindex(grid_coarse[0].shape))
     per_thread = int(round(len(all_indices) / N_THREADS))
 
-    def do(q, ind_thread, thread_num):
+    def calculate_saddles(q, ind_thread, thread_num):
+        """
+        One thread: calculate saddle points for a list of indices.
+        """
         saddles_coarse_t = np.copy(saddles_coarse)
         saddle_distance_coarse_t = np.copy(saddle_distance_coarse)
 
@@ -398,8 +438,7 @@ def steepest_descent():
 
             coord = [g[idx] for g in grid_coarse]
             # get saddle points
-            # saddles = np.roots(saddle_coefficients(*coord))
-            saddles = np.roots([s(*coord) for s in saddle_coefficients(*coord)])
+            saddles = np.roots(saddle_coefficients(*coord))
             # sort saddles
             saddles = sorted(saddles, key=lambda x: (np.imag(x), np.real(x), abs(x)))
 
@@ -414,13 +453,14 @@ def steepest_descent():
 
         q.put([saddles_coarse_t, saddle_distance_coarse_t])
 
-    for thread in xrange(N_THREADS):
+    for thread_num in xrange(N_THREADS):
+        # index list for this thead
         index_list.append(
-            all_indices[thread*per_thread:((thread+1)*per_thread - 1)]
+            all_indices[thread_num*per_thread:((thread_num+1)*per_thread - 1)]
         )
 
         q = Queue()
-        p = Process(target=do, args=(q, index_list[-1], thread))
+        p = Process(target=calculate_saddles, args=(q, index_list[-1], thread_num))
         p.start()
         processes.append((q,p))
 
@@ -449,10 +489,10 @@ def steepest_descent():
     # evaluate the second derivative as criterium whether saddle approximation
     # is valid
     dd_evaluated = np.array(
-        [abs(np.squeeze(dd(r, *grid_fine))) for r in saddles_fine]
+        [abs(dd(s, *grid_fine)) for s in saddles_fine]
     ).min(axis=0)
 
-    def _saddle_contribution(saddle_i, grid_fine):
+    def saddle_contribution(saddle_i, grid_fine):
         """
         Calculates the contribution to the E-field of each saddle.
         """
@@ -474,7 +514,7 @@ def steepest_descent():
         return ret
 
     # calculate E field as sum of saddle contributions
-    E_s = sum(_saddle_contribution(i, grid_fine) for i in xrange(ORDER-1))
+    E_s = sum(saddle_contribution(i, grid_fine) for i in xrange(ORDER-1))
 
     print '%f seconds' % (time() - t)
 
@@ -500,41 +540,59 @@ def interpolate(range_coarse, range_fine, mat):
 
 
 # ============================= PLOTS =============================
-def _plot(mat, vmin, vmax, n):
+def plot_single_mat(mat, vmin, vmax, n, title):
     axes = []
 
     for i, (lim, res) in enumerate(zip(LIMITS, RESOLUTION)):
         if i in PLOT_AXES:
             axes.append(np.linspace(lim[0], lim[1], res))
 
-    plt.subplot(1, 2, n)
+    plt.figure(n)
+    plt.clf()
     plt.pcolormesh(axes[0], axes[1], mat, vmax=vmax, vmin=vmin)
     plt.colorbar()
     plt.xlim(min(axes[0]), max(axes[0]))
     plt.ylim(min(axes[1]), max(axes[1]))
     plt.xlabel(lowercase[PLOT_AXES[0]])
     plt.ylabel(lowercase[PLOT_AXES[1]])
+    plt.title(title)
 
 
-def plot(E_i_flat, E_s):
-    # restore original shape of E_i from flat array
-    E_i = np.zeros(E_s.shape).astype(complex).T
-    E_i[mask == 0] = E_i_flat
-    E_i = E_i.T
+def plot(E_i, E_s, mask_start, new_mask=None):
+    if E_i is not None:
+        if len(E_i.shape) == 1:
+            # restore original shape of E_i from flat array
+            E_i_mat = np.zeros(PLOT_RESOLUTION).astype(complex).T
+            E_i_mat[mask_start == 0] = E_i
+            E_i = E_i_mat.T
 
-    E_s_mask = np.ma.masked_array(E_s, mask.T==0)
-    E_i_mask = np.ma.masked_array(E_i, mask.T)
+        E_s_mask = np.ma.masked_array(E_s, mask_start.T==0)
+        E_i_mask = np.ma.masked_array(E_i, mask_start.T)
 
-    # merge matrices
-    E = E_s_mask.filled(0) + E_i_mask.filled(0) * np.exp(1j*np.pi/4)
+        # merge matrices
+        E = E_s_mask.filled(0) + E_i_mask.filled(0) * np.exp(1j*np.pi/4)
+    else:
+        E = E_s
 
     I = abs(E)**2
     ang = np.angle(E)
 
-    plt.clf()
+    plot_single_mat(I, 0, PLOT_MAX, 1, 'Intensity')
+    plot_single_mat(ang, -np.pi, np.pi, 2, 'Phase')
 
-    _plot(I, 0, PLOT_MAX, 1)
-    _plot(ang, -np.pi, np.pi, 2)
+    if new_mask is not None:
+        if len(new_mask.shape) == 1:
+            # restore original shape of mask from flat array
+            new_mask_mat = np.ones(PLOT_RESOLUTION).astype(complex).T
+            new_mask_mat[mask_start == 0] = new_mask
+            new_mask = new_mask_mat
+        plot_single_mat(np.ones(new_mask.T.shape) - new_mask.T, 0, 1, 3,
+            'Mask of not converged pixels')
+    else:
+        plot_single_mat(np.ones(mask_start.T.shape) - mask_start.T, 0, 1, 3,
+            'Mask of not converged pixels')
+
+    plt.pause(0.5)
 
     return E
 
@@ -569,11 +627,11 @@ def show_complex_plain():
     plt.colorbar()
 
 
-def get_mask():
+def ask_for_mask(E_s, saddle_distance, dd_evaluated):
     while True:
         # pixels == 1 are handled by steepest descent method,
         # pixels == 0 by integration method
-        mask = np.ones(E_s.shape)
+        mask = np.ones(PLOT_RESOLUTION)
         # mask pixels with small minimal saddle distance
         mask[saddle_distance < THRESHOLDS[0]] = 0
         # mask pixels with small second derivative
@@ -582,10 +640,7 @@ def get_mask():
         mask[abs(E_s)**2 > 5] = 0
 
         # plot intensity and mask
-        plt.clf()
-        _plot(abs(E_s)**2, 0, PLOT_MAX, 1)
-        _plot(mask, 0, 1, 2)
-        plt.pause(0.5)
+        plot(None, E_s, mask.T)
 
         try:
             inp = raw_input('Masken-Schwellwerte %f und %f ok? ' % (THRESHOLDS[0], THRESHOLDS[1]))
@@ -600,29 +655,4 @@ def get_mask():
 
 
 if __name__ == '__main__':
-    if SHOW_INTEGRATION_PATH:
-        show_complex_plain()
-        plt.set_cmap('gray')
-    else:
-        plt.set_cmap('jet')
-
-    if not SHOW_INTEGRATION_PATH:
-        E_s, saddle_distance, dd_evaluated = steepest_descent()
-        mask = get_mask()
-    else:
-        E_s = 0
-        mask = np.zeros((2,2))
-
-    E_i = integration_method()
-
-    if not SHOW_INTEGRATION_PATH:
-        E = plot(E_i, E_s)
-        dct = copy(locals())
-        if FILENAME:
-            vars_to_save = ['E', 'E_i', 'E_s', 'saddle_distance', 'dd_evaluated',
-                'mask', 'LIMITS', 'RESOLUTION', 'N_ROOTS', 'N_SADDLES', 'THRESHOLDS',
-                'NUM_WEIGHTS', 'SHOW_INTEGRATION_PATH', 'CALCULATE_ARC_EVERY_N_STEPS',
-                'N_THREADS', 'D', 'ORDER']
-            savemat(FILENAME, {
-                key: dct[key] for key in vars_to_save
-            })
+    E, E_i, E_s = start()
